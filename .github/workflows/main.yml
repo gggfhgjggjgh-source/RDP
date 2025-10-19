@@ -23,11 +23,11 @@ jobs:
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null || $null
           
-          # Allow incoming RDP on port 3389 (adjust if you want to restrict)
+          # Allow incoming RDP on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # Restart the Remote Desktop service to ensure changes take effect
+          # Restart Remote Desktop service
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with secret Password
@@ -35,33 +35,42 @@ jobs:
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          # Use password from GitHub Secrets (do NOT echo or print it)
-          $password = $env:RDP_PASSWORD
-
-          # Convert to secure string
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # If user exists, remove then recreate (optional)
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Remove-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
-          }
-
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -ErrorAction Stop
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
-
-          # Export only the username to the workflow env (do NOT export the password)
-          echo "RDP_USER=RDP" >> $env:GITHUB_ENV
-
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
+          if (-not $env:RDP_PASSWORD -or $env:RDP_PASSWORD.Trim().Length -eq 0) {
+              Write-Error "Secret RDP_PASSWORD is empty or not available. 
+Possible causes:
+  - Secret 'RDP_PASSWORD' not set in the repository.
+  - Workflow was triggered from a fork/PR where secrets are not exposed.
+  - Typo in the secret name or YAML.
+Please set the secret in Settings → Secrets and variables → Actions and re-run the workflow."
               exit 1
           }
+
+          Write-Host "RDP_PASSWORD secret found (value hidden). Proceeding to create user..."
+
+          $password = $env:RDP_PASSWORD
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          try {
+              if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+                  Remove-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
+              }
+
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -ErrorAction Stop
+              Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
+
+              echo "RDP_USER=RDP" >> $env:GITHUB_ENV
+          }
+          catch {
+              Write-Error "Failed to create the local user: $($_.Exception.Message)"
+              exit 1
+          }
+
+          Write-Host "RDP user created successfully."
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          # Update the URL if you need a different version; stable URL is preferred
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
@@ -74,10 +83,8 @@ jobs:
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          # Wait for Tailscale to assign an IPv4 address
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
@@ -92,15 +99,12 @@ jobs:
               exit 1
           }
 
-          # Save tailcale IP to env for later steps
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Verify RDP Accessibility
         shell: pwsh
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
@@ -117,7 +121,6 @@ jobs:
           Write-Host "Password: (hidden for security)"
           Write-Host "==================`n"
           
-          # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
